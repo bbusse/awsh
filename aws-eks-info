@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# aws-eks-info: Show cluster info for AWS EKS clusters
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+function aws_eks_version() {
+    local cluster_name="$1"
+    aws eks describe-cluster --name "$cluster_name" --query 'cluster.version' --output text
+}
+
+function aws_eks_cluster_name() {
+    local cluster_name="$1"
+    aws eks describe-cluster --name "$cluster_name" --query 'cluster.name' --output text
+}
+
+function aws_eks_detect_cluster_name() {
+    aws eks list-clusters --query 'clusters[0]' --output text
+}
+
+function aws_eks_cluster_info() {
+    local cluster_name="$1"
+    local version node_count instance_type node_versions cluster_display
+    version=$(aws_eks_version "$cluster_name")
+    node_count=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    instance_type=$(kubectl get nodes --no-headers -o custom-columns=TYPE:.metadata.labels."node\.kubernetes\.io/instance-type" 2>/dev/null | sort | uniq -c | sort -rn | awk 'NR==1{print $2}')
+    node_versions=$(aws_eks_node_versions "$cluster_name")
+    cluster_display=$(aws_eks_cluster_name "$cluster_name")
+
+    printf '%b\n' "\033[1m${cluster_display}\033[0m"
+    printf '%s\n' "${node_count} nodes  ${instance_type}  v${version}"
+    printf '%s\n' ""
+    printf '%b\n' "\033[1mNodes\033[0m"
+    printf '%s\n' "$node_versions"
+}
+
+function aws_eks_node_versions() {
+    local cluster_name="$1"
+    kubectl get nodes --no-headers -o custom-columns=VERSION:.status.nodeInfo.kubeletVersion \
+        | sort | uniq -c | awk '{print $2" ("$1")"}'
+}
+
+main() {
+    local cluster_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                cluster_name="$2"
+                shift 2
+                ;;
+            *)
+                cluster_name="$1"
+                shift
+                ;;
+        esac
+    done
+
+    cluster_name="${cluster_name:-$(aws_eks_detect_cluster_name)}"
+    if [[ -z "$cluster_name" ]]; then
+        printf '%s\n' "error: no cluster name provided and autodetect failed" >&2
+        exit 1
+    fi
+    aws_eks_cluster_info "$cluster_name"
+}
+
+main "$@"
