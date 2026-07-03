@@ -181,14 +181,14 @@ fetch_metrics_background() {
 			--output text 2>/dev/null)
 
 		if [[ "$cpu" != "None" && -n "$cpu" ]]; then
-			cpu_total=$(printf '%s\n' "$cpu_total + $cpu" | bc)
+			cpu_total=$(awk -v a="$cpu_total" -v b="$cpu" 'BEGIN { printf "%.6f", (a + b) }')
 			cpu_count=$((cpu_count + 1))
 		fi
 	done
 
 	local cpu_avg="-"
 	if ((cpu_count > 0)); then
-		cpu_avg=$(printf '%s\n' "$cpu_total / $cpu_count" | bc)
+		cpu_avg=$(awk -v total="$cpu_total" -v count="$cpu_count" 'BEGIN { printf "%d", (total / count) }')
 	fi
 
 	printf '%s' "$cpu_avg" >"$cache_file"
@@ -348,9 +348,9 @@ render_once() {
 		local cpu_display="${cpu_str}%"
 		local cpu_color="$NC"
 		if [[ "$cpu_str" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-			if (($(printf '%s > 80\n' "$cpu_str" | bc -l))); then
+			if [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n > 80) ? 1 : 0 }')" -eq 1 ]]; then
 				cpu_color="$RED"
-			elif (($(printf '%s >= 60\n' "$cpu_str" | bc -l))); then
+			elif [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n >= 60) ? 1 : 0 }')" -eq 1 ]]; then
 				cpu_color="$ORANGE"
 			fi
 		fi
