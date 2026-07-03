@@ -104,6 +104,18 @@ command -v jq >/dev/null 2>&1 || {
 	exit 1
 }
 
+date_utc_minus_minutes() {
+	local minutes=$1
+	case "$(uname -s)" in
+	Darwin)
+		date -u -v-"${minutes}"M +%Y-%m-%dT%H:%M:%S
+		;;
+	*)
+		date -u --date="${minutes} minutes ago" +%Y-%m-%dT%H:%M:%S
+		;;
+	esac
+}
+
 AWS_ARGS=()
 if [[ -n "$PROFILE" ]]; then
 	AWS_ARGS+=(--profile "$PROFILE")
@@ -151,7 +163,7 @@ fetch_metrics_background() {
 
 	now=$(date -u +%Y-%m-%dT%H:%M:%S)
 	end_time=$now
-	start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%S)
+	start_time=$(date_utc_minus_minutes 5)
 
 	local cpu_total=0 cpu_count=0
 
