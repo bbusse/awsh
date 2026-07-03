@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+function aws_aurora_cpu() {
+    local cluster="$1"
+    local end_time start_time
+    end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+
+    aws cloudwatch get-metric-statistics \
+        --namespace AWS/RDS \
+        --metric-name CPUUtilization \
+        --dimensions "Name=DBClusterIdentifier,Value=$cluster" \
+        --start-time "$start_time" \
+        --end-time "$end_time" \
+        --period 300 \
+        --statistics Average \
+        --query 'Datapoints[0].Average' \
+        --output text 2>/dev/null
+}
+
+function aws_aurora_mem() {
+    local cluster="$1"
+    local end_time start_time
+    end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+
+    aws cloudwatch get-metric-statistics \
+        --namespace AWS/RDS \
+        --metric-name FreeableMemory \
+        --dimensions "Name=DBClusterIdentifier,Value=$cluster" \
+        --start-time "$start_time" \
+        --end-time "$end_time" \
+        --period 300 \
+        --statistics Average \
+        --query 'Datapoints[0].Average' \
+        --output text 2>/dev/null
+}
+
+function aws_aurora_connections() {
+    local cluster="$1"
+    local end_time
+    local start_time
+    end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+
+    aws cloudwatch get-metric-statistics \
+        --namespace AWS/RDS \
+        --metric-name DatabaseConnections \
+        --dimensions "Name=DBClusterIdentifier,Value=$cluster" \
+        --start-time "$start_time" \
+        --end-time "$end_time" \
+        --period 300 \
+        --statistics Average \
+        --query 'Datapoints[0].Average' \
+        --output text 2>/dev/null
+}
+
+function aws_aurora_detect_cluster() {
+    aws rds describe-db-clusters --query 'DBClusters[0].DBClusterIdentifier' --output text 2>/dev/null
+}
+
+function aws_aurora_total_memory() {
+    local cluster="$1"
+    # Get instance class of the first instance in the cluster
+    local instance_class
+    instance_class=$(aws rds describe-db-instances \
+        --filters "Name=db-cluster-id,Values=$cluster" \
+        --query 'DBInstances[0].DBInstanceClass' \
+        --output text 2>/dev/null)
+
+    # Map instance class to total memory in bytes
+    case "$instance_class" in
+        db.t3.micro) printf '%s\n' 1073741824 ;;       # 1 GB
+        db.t3.small) printf '%s\n' 2147483648 ;;       # 2 GB
+        db.t3.medium) printf '%s\n' 4294967296 ;;      # 4 GB
+        db.t3.large) printf '%s\n' 8589934592 ;;       # 8 GB
+        db.t4g.micro) printf '%s\n' 1073741824 ;;      # 1 GB
+        db.t4g.small) printf '%s\n' 2147483648 ;;      # 2 GB
+        db.t4g.medium) printf '%s\n' 4294967296 ;;     # 4 GB
+        db.t4g.large) printf '%s\n' 8589934592 ;;      # 8 GB
+        db.r5.large) printf '%s\n' 17179869184 ;;      # 16 GB
+        db.r5.xlarge) printf '%s\n' 34359738368 ;;     # 32 GB
+        db.r5.2xlarge) printf '%s\n' 68719476736 ;;    # 64 GB
+        db.r5.4xlarge) printf '%s\n' 137438953472 ;;   # 128 GB
+        db.r5.8xlarge) printf '%s\n' 274877906944 ;;   # 256 GB
+        db.r5.12xlarge) printf '%s\n' 412316860416 ;;  # 384 GB
+        db.r5.16xlarge) printf '%s\n' 549755813888 ;;  # 512 GB
+        db.r6g.large) printf '%s\n' 17179869184 ;;     # 16 GB
+        db.r6g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
+        db.r6g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
+        db.r6g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
+        db.r6g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
+        db.r6g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
+        db.r6g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
+        db.r7g.large) printf '%s\n' 17179869184 ;;     # 16 GB
+        db.r7g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
+        db.r7g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
+        db.r7g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
+        db.r7g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
+        db.r7g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
+        db.r7g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
+        *) printf '%s\n' "" ;;
+    esac
+}
+
+function aws_aurora_blocked_connections() {
+    local cluster="$1"
+    local end_time start_time
+    end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+
+    aws cloudwatch get-metric-statistics \
+        --namespace AWS/RDS \
+        --metric-name BlockedTransactions \
+        --dimensions "Name=DBClusterIdentifier,Value=$cluster" \
+        --start-time "$start_time" \
+        --end-time "$end_time" \
+        --period 300 \
+        --statistics Average \
+        --query 'Datapoints[0].Average' \
+        --output text 2>/dev/null
+}
+
+function aws_aurora_monitor() {
+    local cluster="$1"
+    local cpu mem conn blocked total_mem engine_version instance_class instance_count
+
+    cpu=$(aws_aurora_cpu "$cluster")
+    mem=$(aws_aurora_mem "$cluster")
+    conn=$(aws_aurora_connections "$cluster")
+    blocked=$(aws_aurora_blocked_connections "$cluster")
+    total_mem=$(aws_aurora_total_memory "$cluster")
+
+    # Get cluster info for first row
+    engine_version=$(aws rds describe-db-clusters --db-cluster-identifier "$cluster" \
+        --query 'DBClusters[0].EngineVersion' --output text 2>/dev/null)
+    instance_class=$(aws rds describe-db-instances \
+        --filters "Name=db-cluster-id,Values=$cluster" \
+        --query 'DBInstances[0].DBInstanceClass' --output text 2>/dev/null)
+    instance_count=$(aws rds describe-db-instances \
+        --filters "Name=db-cluster-id,Values=$cluster" \
+        --query 'length(DBInstances)' --output text 2>/dev/null)
+
+    # First row: cluster name bold, then version, then instances/type
+    printf '%b\n' "\033[1m${cluster}\033[0m"
+    printf '%s\n' ""
+    printf '%s\n' "v${engine_version}"
+    printf '%s\n' "${instance_count} instances  ${instance_class}"
+    printf '%s\n' ""
+
+    # Round CPU to 2 decimal places
+    if [[ "$cpu" != "None" && -n "$cpu" ]]; then
+        cpu=$(awk "BEGIN {printf \"%.2f\", $cpu}")
+    fi
+
+    # Format memory as "used GB / total GB"
+    if [[ "$mem" != "None" && -n "$mem" && -n "$total_mem" ]]; then
+        mem=$(awk "BEGIN {
+            free_gb = $mem / 1024 / 1024 / 1024
+            total_gb = $total_mem / 1024 / 1024 / 1024
+            used_gb = total_gb - free_gb
+            printf \"%.1f GB / %.0f GB\", used_gb, total_gb
+        }")
+    elif [[ "$mem" != "None" && -n "$mem" ]]; then
+        mem=$(awk "BEGIN {printf \"%.1f GB free\", $mem / 1024 / 1024 / 1024}")
+    fi
+
+    local width=${COLUMNS:-40}
+    local label_width=14
+    local val_width=$((width - label_width))
+
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "CPU" "${cpu}%"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "MEM" "${mem}"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "Connections" "${conn}"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "Blocked" "${blocked}"
+}
+
+main() {
+    local cluster=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                cluster="$2"
+                shift 2
+                ;;
+            *)
+                cluster="$1"
+                shift
+                ;;
+        esac
+    done
+
+    cluster="${cluster:-$(aws_aurora_detect_cluster)}"
+    if [[ -z "$cluster" || "$cluster" == "None" ]]; then
+        printf '%s\n' "error: no cluster found and autodetect failed" >&2
+        exit 1
+    fi
+    aws_aurora_monitor "$cluster"
+}
+
+main "$@"

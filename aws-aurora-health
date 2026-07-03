@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# aws-aurora-health: Check health of AWS Aurora clusters
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+print_help() {
+    cat <<'EOF'
+Usage: aws-aurora-health [<cluster-name>|--name <cluster-name>]
+
+Check health status of an Aurora cluster.
+Returns 0 if cluster is available, 1 otherwise.
+
+Options:
+  --name <cluster-name>    Aurora cluster name (optional)
+  -h, --help               Show this help
+
+If no cluster name is provided, attempts to detect the first available cluster.
+EOF
+}
+
+function aws_aurora_detect_cluster() {
+    aws rds describe-db-clusters --query 'DBClusters[0].DBClusterIdentifier' --output text
+}
+
+function aws_aurora_cluster_status() {
+    local cluster="$1"
+    aws rds describe-db-clusters --db-cluster-identifier "$cluster" \
+        --query 'DBClusters[0].Status' --output text
+}
+
+function aws_aurora_instance_statuses() {
+    local cluster="$1"
+    aws rds describe-db-instances \
+        --filters "Name=db-cluster-id,Values=$cluster" \
+        --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus]' \
+        --output text
+}
+
+function aws_aurora_cluster_health() {
+    local cluster="$1"
+    local status
+    status=$(aws_aurora_cluster_status "$cluster")
+
+    if [[ "$status" == "available" ]]; then
+        printf '0\n'
+    else
+        printf '1\n'
+    fi
+}
+
+main() {
+    local cluster=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                cluster="$2"
+                shift 2
+                ;;
+            -h | --help)
+                print_help
+                exit 0
+                ;;
+            *)
+                cluster="$1"
+                shift
+                ;;
+        esac
+    done
+
+    cluster="${cluster:-$(aws_aurora_detect_cluster)}"
+    if [[ -z "$cluster" || "$cluster" == "None" ]]; then
+        printf 'error: no cluster found and autodetect failed\n' >&2
+        exit 1
+    fi
+    aws_aurora_cluster_health "$cluster"
+}
+
+main "$@"
