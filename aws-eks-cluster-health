@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# aws-eks-cluster-health: Show the global health status of an EKS cluster
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+set -euo pipefail
+
+PROFILE=""
+REGION=""
+
+print_help() {
+    cat <<'EOF'
+Usage: aws-eks-cluster-health [--profile PROFILE] [--region REGION]
+
+Shows the global EKS cluster health status.
+Auto-detects cluster from current kubectl context if available.
+
+Options:
+  --profile PROFILE     AWS profile to use
+  --region REGION       AWS region to query
+  -h, --help            Show this help
+EOF
+}
+
+get_current_cluster() {
+    kubectl config current-context 2>/dev/null | awk -F'/' '{print $2}' || printf '%s\n' ""
+}
+
+print_cluster_health() {
+    local cluster_name=$1
+    local -a aws_args=("$@")
+    aws_args=("${aws_args[@]:1}")
+
+    aws "${aws_args[@]}" eks describe-cluster --name "$cluster_name" --output json | jq -r --arg name "$cluster_name" '
+    (.cluster.health.issues // []) | length
+  '
+}
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile)
+                PROFILE="$2"
+                shift 2
+                ;;
+            --region)
+                REGION="$2"
+                shift 2
+                ;;
+            -h | --help)
+                print_help
+                exit 0
+                ;;
+            *)
+                printf "Unknown argument: %s\n" "$1" >&2
+                print_help
+                exit 1
+                ;;
+        esac
+    done
+
+    local aws_args=()
+    [[ -n "$PROFILE" ]] && aws_args+=(--profile "$PROFILE")
+    [[ -n "$REGION" ]] && aws_args+=(--region "$REGION")
+
+    local cluster_name
+    cluster_name=$(get_current_cluster)
+
+    if [[ -n "$cluster_name" ]]; then
+        print_cluster_health "$cluster_name" "${aws_args[@]}"
+    else
+        local clusters
+        clusters=$(aws "${aws_args[@]}" eks list-clusters --query 'clusters[]' --output text)
+
+        for cluster_name in $clusters; do
+            print_cluster_health "$cluster_name" "${aws_args[@]}"
+        done
+    fi
+}
+
+main "$@"
