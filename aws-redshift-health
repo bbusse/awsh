@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#
+# aws-redshift-health: Show global redshift health
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+function aws_redshift_detect_cluster() {
+    aws redshift describe-clusters \
+        --query 'Clusters[0].ClusterIdentifier' --output text 2>/dev/null
+}
+
+function aws_redshift_health() {
+    local cluster="$1"
+    local status
+    status=$(aws redshift describe-clusters --cluster-identifier "$cluster" \
+        --query 'Clusters[0].ClusterStatus' --output text 2>/dev/null)
+
+    if [[ "$status" == "available" ]]; then
+        printf '%s\n' "0"
+    else
+        printf '%s\n' "1"
+    fi
+}
+
+main() {
+    local cluster=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cluster)
+                cluster="$2"
+                shift 2
+                ;;
+            *)
+                cluster="$1"
+                shift
+                ;;
+        esac
+    done
+
+    cluster="${cluster:-$(aws_redshift_detect_cluster)}"
+    if [[ -z "$cluster" || "$cluster" == "None" ]]; then
+        printf '%s\n' "error: no cluster found and autodetect failed" >&2
+        exit 1
+    fi
+    aws_redshift_health "$cluster"
+}
+
+main "$@"
