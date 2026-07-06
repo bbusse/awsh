@@ -1,0 +1,727 @@
+#!/usr/bin/env bash
+#
+# Redshift Cluster Performance Monitor
+# Real-time display of all CloudWatch metrics for Redshift clusters
+#
+# SPDX-FileCopyrightText: Björn Busse <bj.rn@baerlin.eu>
+# SPDX-License-Identifier: BSD-3-Clause
+#
+
+set -euo pipefail
+shopt -s checkwinsize
+
+PROFILE=""
+REGION=""
+INTERVAL=60
+ONCE="false"
+SHOW_ALL="false"
+COMPACT="false"
+
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+GREEN=$'\033[0;32m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
+HIDE_CURSOR=$'\033[?25l'
+SHOW_CURSOR=$'\033[?25h'
+
+print_help() {
+    cat <<'EOF'
+Usage: aws-redshift-monitor [--profile PROFILE] [--region REGION] [--once] [--interval SECONDS]
+
+Monitors all CloudWatch metrics for Redshift clusters in real time.
+
+Options:
+  --profile PROFILE     AWS profile to use
+  --region REGION       AWS region to query
+  --once                Print once and exit (fetches metrics then re-renders)
+  --interval SECONDS    Refresh interval in seconds (default: 60)
+  --all                 Include verbose sections (stage/querytype/WLM breakdowns)
+  --compact             Single-cluster summary view (implies --once)
+  -h, --help            Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --profile)
+        PROFILE="$2"
+        shift 2
+        ;;
+    --region)
+        REGION="$2"
+        shift 2
+        ;;
+    --once)
+        ONCE="true"
+        shift
+        ;;
+    --interval)
+        INTERVAL="$2"
+        shift 2
+        ;;
+    --all)
+        SHOW_ALL="true"
+        shift
+        ;;
+    --compact)
+        COMPACT="true"
+        shift
+        ;;
+    -h | --help)
+        print_help
+        exit 0
+        ;;
+    *)
+        printf "Unknown argument: %s\n" "$1" >&2
+        print_help
+        exit 1
+        ;;
+    esac
+done
+
+command -v aws >/dev/null 2>&1 || {
+    printf "aws CLI not found\n" >&2
+    exit 1
+}
+command -v jq >/dev/null 2>&1 || {
+    printf "jq not found\n" >&2
+    exit 1
+}
+command -v bc >/dev/null 2>&1 || {
+    printf "bc not found\n" >&2
+    exit 1
+}
+
+AWS_ARGS=()
+[[ -n "$PROFILE" ]] && AWS_ARGS+=(--profile "$PROFILE")
+[[ -n "$REGION" ]] && AWS_ARGS+=(--region "$REGION")
+
+export METRICS_TMPDIR
+METRICS_TMPDIR=$(mktemp -d)
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+fetch_account() {
+    aws "${AWS_ARGS[@]}" sts get-caller-identity --query Account --output text 2>/dev/null || printf "unknown"
+}
+
+cache_key() {
+    printf '%s' "$*" | md5sum | cut -d' ' -f1
+}
+
+get_cached() {
+    local f
+    f="$METRICS_TMPDIR/$(cache_key "$@")"
+    [[ -f "$f" ]] && cat "$f" || printf 'None'
+}
+
+is_cached() {
+    [[ -f "$METRICS_TMPDIR/$(cache_key "$@")" ]]
+}
+
+na() { printf '%s' '--'; }
+
+format_pct() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    printf '%.1f%%' "$v" 2>/dev/null || na
+}
+
+format_num() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    printf '%.1f' "$v" 2>/dev/null || na
+}
+
+format_int() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    printf '%.0f' "$v" 2>/dev/null || na
+}
+
+format_bytes() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    local val
+    val=$(printf '%.0f' "$v" 2>/dev/null) || {
+        na
+        return
+    }
+    [[ -z "$val" ]] && {
+        na
+        return
+    }
+    if ((val >= 1073741824)); then
+        printf '%.2f GB' "$(printf '%s\n' "scale=2; $val / 1073741824" | bc -l)"
+    elif ((val >= 1048576)); then
+        printf '%.2f MB' "$(printf '%s\n' "scale=2; $val / 1048576" | bc -l)"
+    elif ((val >= 1024)); then
+        printf '%.1f KB' "$(printf '%s\n' "scale=1; $val / 1024" | bc -l)"
+    else
+        printf '%d B' "$val"
+    fi
+}
+
+format_throughput() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    local val
+    val=$(printf '%.0f' "$v" 2>/dev/null) || {
+        na
+        return
+    }
+    [[ -z "$val" ]] && {
+        na
+        return
+    }
+    if ((val >= 1073741824)); then
+        printf '%.2f GB/s' "$(printf '%s\n' "scale=2; $val / 1073741824" | bc -l)"
+    elif ((val >= 1048576)); then
+        printf '%.2f MB/s' "$(printf '%s\n' "scale=2; $val / 1048576" | bc -l)"
+    elif ((val >= 1024)); then
+        printf '%.1f KB/s' "$(printf '%s\n' "scale=1; $val / 1024" | bc -l)"
+    else
+        printf '%d B/s' "$val"
+    fi
+}
+
+format_ms() {
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    local ms
+    ms=$(printf '%s\n' "scale=2; $v * 1000" | bc -l 2>/dev/null) || {
+        na
+        return
+    }
+    [[ -z "$ms" ]] && {
+        na
+        return
+    }
+    printf '%.2f ms' "$ms" 2>/dev/null || na
+}
+
+format_duration_us() {
+    # CloudWatch QueryDuration is in microseconds
+    local v=$1
+    [[ "$v" == "None" || "$v" == "-" || -z "$v" ]] && {
+        na
+        return
+    }
+    local ms
+    ms=$(printf '%s\n' "scale=2; $v / 1000" | bc -l 2>/dev/null) || {
+        na
+        return
+    }
+    [[ -z "$ms" ]] && {
+        na
+        return
+    }
+    local val
+    val=$(printf '%.0f' "$ms" 2>/dev/null) || {
+        na
+        return
+    }
+    if ((val >= 60000)); then
+        printf '%.1f min' "$(printf '%s\n' "scale=1; $ms / 60000" | bc -l)"
+    elif ((val >= 1000)); then
+        printf '%.2f s' "$(printf '%s\n' "scale=2; $ms / 1000" | bc -l)"
+    else
+        printf '%.0f ms' "$ms"
+    fi
+}
+
+# ── metric display ────────────────────────────────────────────────────────────
+
+LABEL_WIDTH=38
+
+metric_row() {
+    # Usage: metric_row LABEL VALUE [COLOR] [UNIT]
+    local label=$1 value=$2 color=${3:-} unit=${4:-}
+    [[ -z "$color" ]] && color=$NC
+    local display="$value"
+    [[ -n "$unit" ]] && display="$value $unit"
+    printf "    %s%-${LABEL_WIDTH}s%s %s%s%s\n" "$DIM" "$label" "$NC" "$color" "$display" "$NC"
+}
+
+section_header() {
+    printf "\n  ${BOLD}%s${NC}\n" "$1"
+}
+
+# ── CloudWatch fetchers (run in background) ───────────────────────────────────
+
+cw_fetch() {
+    # Args: cache_key metric stat [dim-name dim-value ...]
+    local key=$1 metric=$2 stat=$3
+    shift 3
+    local f="$METRICS_TMPDIR/$key"
+    local now start dims=()
+    now=$(date -u +%Y-%m-%dT%H:%M:%S)
+    start=$(date -u -v-5M +%Y-%m-%dT%H:%M:%S)
+    while (($# >= 2)); do
+        dims+=("Name=$1,Value=$2")
+        shift 2
+    done
+    local val
+    val=$(aws "${AWS_ARGS[@]}" cloudwatch get-metric-statistics \
+        --namespace AWS/Redshift \
+        --metric-name "$metric" \
+        --dimensions "${dims[@]}" \
+        --start-time "$start" --end-time "$now" \
+        --period 300 --statistics "$stat" \
+        --query "Datapoints[0].$stat" --output text 2>/dev/null) || val="None"
+    printf '%s' "${val:-None}" >"$f"
+}
+
+# ── dimension discovery (run in background, writes to named files) ────────────
+
+discover_dims() {
+    local file=$1 metric=$2 dim_name=$3 cluster_id=$4
+    aws "${AWS_ARGS[@]}" cloudwatch list-metrics \
+        --namespace AWS/Redshift \
+        --metric-name "$metric" \
+        --dimensions Name=ClusterIdentifier,Value="$cluster_id" \
+        --output json 2>/dev/null |
+        jq -r --arg d "$dim_name" '.Metrics[].Dimensions[] | select(.Name == $d) | .Value' |
+        sort -u >"$file"
+}
+
+# ── cluster list ──────────────────────────────────────────────────────────────
+
+fetch_clusters() {
+    aws "${AWS_ARGS[@]}" redshift describe-clusters --output json 2>/dev/null |
+        jq -r '.Clusters[] | [.ClusterIdentifier, .NodeType, (.NumberOfNodes|tostring), .ClusterStatus] | @tsv'
+}
+
+# ── spawn all background fetches for a cluster ────────────────────────────────
+
+spawn_fetches() {
+    local cid=$1
+
+    # Cluster-level metrics (ClusterIdentifier only)
+    local -A cluster_metrics=(
+        [CPUUtilization]=Average
+        [PercentageDiskSpaceUsed]=Average
+        [DatabaseConnections]=Average
+        [CommitQueueLength]=Average
+        [HealthStatus]=Average
+        [MaintenanceMode]=Average
+        [NetworkReceiveThroughput]=Average
+        [NetworkTransmitThroughput]=Average
+        [ReadIOPS]=Average
+        [WriteIOPS]=Average
+        [ReadLatency]=Average
+        [WriteLatency]=Average
+        [ReadThroughput]=Average
+        [WriteThroughput]=Average
+        [TotalTableCount]=Average
+        [AutoVacuumSpaceFreed]=Sum
+        [ConcurrencyScalingActiveClusters]=Average
+        [MaxConfiguredConcurrencyScalingClusters]=Average
+        [NumExceededSchemaQuotas]=Average
+        [RedshiftManagedStorageBilledUsedSpace]=Average
+        [RedshiftManagedStorageDsUsedSpace]=Average
+        [RedshiftManagedStorageTotalCapacity]=Average
+    )
+    for metric in "${!cluster_metrics[@]}"; do
+        local stat=${cluster_metrics[$metric]}
+        local key
+        key=$(cache_key "c" "$cid" "$metric")
+        is_cached "c" "$cid" "$metric" && continue
+        cw_fetch "$key" "$metric" "$stat" ClusterIdentifier "$cid" &
+    done
+
+    # QueriesCompletedPerSecond + QueryDuration (ClusterIdentifier + latency)
+    for latency_class in short medium long; do
+        for entry in "QueriesCompletedPerSecond:Sum" "QueryDuration:Average"; do
+            local metric stat
+            metric=${entry%%:*}
+            stat=${entry##*:}
+            is_cached "lat" "$cid" "$latency_class" "$metric" && continue
+            local key
+            key=$(cache_key "lat" "$cid" "$latency_class" "$metric")
+            cw_fetch "$key" "$metric" "$stat" ClusterIdentifier "$cid" latency "$latency_class" &
+        done
+    done
+
+    # Discover WLM queue names (needs ClusterIdentifier + QueueName)
+    local wlm_queues_file
+    wlm_queues_file="$METRICS_TMPDIR/wlmq_$(cache_key "$cid")"
+    if [[ ! -s "$wlm_queues_file" ]]; then
+        discover_dims "$wlm_queues_file" WLMRunningQueries QueueName "$cid" &
+    else
+        while IFS= read -r queue; do
+            for entry in "WLMRunningQueries:Average" "WLMQueueLength:Average" "WLMQueueWaitTime:Average" "WLMQueriesCompletedPerSecond:Sum" "WLMQueryDuration:Average"; do
+                local metric stat
+                metric=${entry%%:*}
+                stat=${entry##*:}
+                is_cached "wlm" "$cid" "$queue" "$metric" && continue
+                local key
+                key=$(cache_key "wlm" "$cid" "$queue" "$metric")
+                cw_fetch "$key" "$metric" "$stat" ClusterIdentifier "$cid" QueueName "$queue" &
+            done
+        done <"$wlm_queues_file"
+    fi
+
+    # Discover QueryType dimension values
+    local qt_file
+    qt_file="$METRICS_TMPDIR/qtypes_$(cache_key "$cid")"
+    if [[ ! -s "$qt_file" ]]; then
+        discover_dims "$qt_file" UserQueriesSucceeded QueryType "$cid" &
+    else
+        while IFS= read -r qt; do
+            for entry in "UserQueriesSucceeded:Sum" "UserQueriesFailed:Sum" "UserQueryDuration:Average"; do
+                local metric stat
+                metric=${entry%%:*}
+                stat=${entry##*:}
+                is_cached "qt" "$cid" "$qt" "$metric" && continue
+                local key
+                key=$(cache_key "qt" "$cid" "$qt" "$metric")
+                cw_fetch "$key" "$metric" "$stat" ClusterIdentifier "$cid" QueryType "$qt" &
+            done
+        done <"$qt_file"
+    fi
+
+    # Discover QueryRuntimeBreakdown stage dimension values
+    local stage_file
+    stage_file="$METRICS_TMPDIR/stages_$(cache_key "$cid")"
+    if [[ ! -s "$stage_file" ]]; then
+        discover_dims "$stage_file" QueryRuntimeBreakdown stage "$cid" &
+    else
+        while IFS= read -r stage; do
+            is_cached "stage" "$cid" "$stage" "QueryRuntimeBreakdown" && continue
+            local key
+            key=$(cache_key "stage" "$cid" "$stage" "QueryRuntimeBreakdown")
+            cw_fetch "$key" QueryRuntimeBreakdown Average ClusterIdentifier "$cid" stage "$stage" &
+        done <"$stage_file"
+    fi
+}
+
+# ── compact summary (mirrors aws-aurora-monitor output style) ───────────────────
+
+render_compact() {
+    local cid=$1 node_type=$2 num_nodes=$3
+
+    local cpu_val disk_val conn_val commit_val
+    cpu_val=$(get_cached "c" "$cid" "CPUUtilization")
+    disk_val=$(get_cached "c" "$cid" "PercentageDiskSpaceUsed")
+    conn_val=$(get_cached "c" "$cid" "DatabaseConnections")
+    commit_val=$(get_cached "c" "$cid" "CommitQueueLength")
+
+    printf '%s\n' "$node_type"
+    printf '%s\n' "${num_nodes} nodes"
+    printf '%s\n' ""
+
+    local width=40
+    local label_width=14
+    local val_width=$((width - label_width))
+
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "CPU" "$(format_pct "$cpu_val")"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "DiskUsed" "$(format_pct "$disk_val")"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "Connections" "$(format_num "$conn_val")"
+    printf "\033[1m%-${label_width}s\033[0m%${val_width}s\n" "CommitQueue" "$(format_num "$commit_val")"
+}
+
+# ── render a single cluster block ─────────────────────────────────────────────
+
+render_cluster_block() {
+    local cid=$1 node_type=$2 num_nodes=$3 status=$4
+    local term_width
+    term_width=$(tput cols 2>/dev/null || printf '%s\n' 80)
+
+    local status_color=$NC
+    [[ "$status" == "available" ]] && status_color=$GREEN
+    [[ "$status" == "unavailable" || "$status" == "failed" ]] && status_color=$RED
+    [[ "$status" == "modifying" || "$status" == "rebooting" ]] && status_color=$YELLOW
+
+    printf "\n${BOLD}Cluster:${NC} %-44s ${BOLD}%s${NC} × %s  %s%s%s\n" \
+        "$cid" "$node_type" "$num_nodes" "$status_color" "$status" "$NC"
+    printf '%*s\n' "$term_width" '' | tr ' ' '─'
+
+    # ── Health ─────────────────────────────────────────────────────────────────
+    section_header "Health"
+    local hval
+    hval=$(get_cached "c" "$cid" "HealthStatus")
+    local mval
+    mval=$(get_cached "c" "$cid" "MaintenanceMode")
+    local hdisp hcolor
+    case "$hval" in
+    1 | 1.0)
+        hdisp="healthy"
+        hcolor=$GREEN
+        ;;
+    None)
+        hdisp="--"
+        hcolor=$NC
+        ;;
+    *)
+        hdisp="unhealthy"
+        hcolor=$RED
+        ;;
+    esac
+    local mdisp mcolor
+    case "$mval" in
+    1 | 1.0)
+        mdisp="on"
+        mcolor=$YELLOW
+        ;;
+    None)
+        mdisp="--"
+        mcolor=$NC
+        ;;
+    *)
+        mdisp="off"
+        mcolor=$GREEN
+        ;;
+    esac
+    metric_row "HealthStatus" "$hdisp" "$hcolor"
+    metric_row "MaintenanceMode" "$mdisp" "$mcolor"
+
+    # ── Compute ────────────────────────────────────────────────────────────────
+    section_header "Compute"
+    local cpu_val
+    cpu_val=$(get_cached "c" "$cid" "CPUUtilization")
+    local cpu_color=$NC
+    if [[ "$cpu_val" != "None" ]]; then
+        local cpu_int
+        cpu_int=$(printf '%.0f' "$cpu_val" 2>/dev/null || printf '%s\n' 0)
+        ((cpu_int >= 80)) && cpu_color=$RED
+        ((cpu_int >= 60 && cpu_int < 80)) && cpu_color=$YELLOW
+    fi
+    metric_row "CPUUtilization" "$(format_pct "$cpu_val")" "$cpu_color"
+
+    # ── Storage ────────────────────────────────────────────────────────────────
+    section_header "Storage"
+    local disk_val
+    disk_val=$(get_cached "c" "$cid" "PercentageDiskSpaceUsed")
+    local disk_color=$NC
+    if [[ "$disk_val" != "None" ]]; then
+        local disk_int
+        disk_int=$(printf '%.0f' "$disk_val" 2>/dev/null || printf '%s\n' 0)
+        ((disk_int >= 85)) && disk_color=$RED
+        ((disk_int >= 70 && disk_int < 85)) && disk_color=$YELLOW
+    fi
+    metric_row "PercentageDiskSpaceUsed" "$(format_pct "$disk_val")" "$disk_color"
+    metric_row "TotalTableCount" "$(format_int "$(get_cached "c" "$cid" "TotalTableCount")")"
+    metric_row "AutoVacuumSpaceFreed" "$(format_bytes "$(get_cached "c" "$cid" "AutoVacuumSpaceFreed")")"
+    metric_row "ManagedStorage BilledUsed" "$(format_bytes "$(get_cached "c" "$cid" "RedshiftManagedStorageBilledUsedSpace")")"
+    metric_row "ManagedStorage DSUsed" "$(format_bytes "$(get_cached "c" "$cid" "RedshiftManagedStorageDsUsedSpace")")"
+    metric_row "ManagedStorage TotalCapacity" "$(format_bytes "$(get_cached "c" "$cid" "RedshiftManagedStorageTotalCapacity")")"
+
+    # ── Connections ────────────────────────────────────────────────────────────
+    section_header "Connections"
+    metric_row "DatabaseConnections" "$(format_int "$(get_cached "c" "$cid" "DatabaseConnections")")"
+    metric_row "CommitQueueLength" "$(format_int "$(get_cached "c" "$cid" "CommitQueueLength")")"
+    metric_row "NumExceededSchemaQuotas" "$(format_int "$(get_cached "c" "$cid" "NumExceededSchemaQuotas")")"
+
+    # ── I/O ────────────────────────────────────────────────────────────────────
+    section_header "I/O"
+    metric_row "ReadIOPS" "$(format_num "$(get_cached "c" "$cid" "ReadIOPS")")" "" "IOPS"
+    metric_row "WriteIOPS" "$(format_num "$(get_cached "c" "$cid" "WriteIOPS")")" "" "IOPS"
+    metric_row "ReadThroughput" "$(format_throughput "$(get_cached "c" "$cid" "ReadThroughput")")"
+    metric_row "WriteThroughput" "$(format_throughput "$(get_cached "c" "$cid" "WriteThroughput")")"
+    metric_row "ReadLatency" "$(format_ms "$(get_cached "c" "$cid" "ReadLatency")")"
+    metric_row "WriteLatency" "$(format_ms "$(get_cached "c" "$cid" "WriteLatency")")"
+
+    # ── Network ────────────────────────────────────────────────────────────────
+    section_header "Network"
+    metric_row "ReceiveThroughput" "$(format_throughput "$(get_cached "c" "$cid" "NetworkReceiveThroughput")")"
+    metric_row "TransmitThroughput" "$(format_throughput "$(get_cached "c" "$cid" "NetworkTransmitThroughput")")"
+
+    # ── Concurrency Scaling ─────────────────────────────────────────────────────
+    section_header "Concurrency Scaling"
+    metric_row "ActiveClusters" "$(format_int "$(get_cached "c" "$cid" "ConcurrencyScalingActiveClusters")")"
+    metric_row "MaxConfiguredClusters" "$(format_int "$(get_cached "c" "$cid" "MaxConfiguredConcurrencyScalingClusters")")"
+
+    # ── Query Performance (latency breakdown) ───────────────────────────────────
+    section_header "Query Performance  (short / medium / long)"
+    for latency_class in short medium long; do
+        local qcps
+        qcps=$(get_cached "lat" "$cid" "$latency_class" "QueriesCompletedPerSecond")
+        local qdur
+        qdur=$(get_cached "lat" "$cid" "$latency_class" "QueryDuration")
+        metric_row "  QueriesCompletedPerSecond ($latency_class)" "$(format_num "$qcps")"
+        metric_row "  QueryDuration ($latency_class)" "$(format_duration_us "$qdur")"
+    done
+
+    if [[ "$SHOW_ALL" == "true" ]]; then
+        # query runtime breakdown (per stage)
+        local stage_file
+        stage_file="$METRICS_TMPDIR/stages_$(cache_key "$cid")"
+        if [[ -s "$stage_file" ]]; then
+            section_header "QueryRuntimeBreakdown (per stage)"
+            while IFS= read -r stage; do
+                local sval
+                sval=$(get_cached "stage" "$cid" "$stage" "QueryRuntimeBreakdown")
+                metric_row "  $stage" "$(format_duration_us "$sval")"
+            done <"$stage_file"
+        fi
+
+        # user queries (per QueryType)
+        local qt_file
+        qt_file="$METRICS_TMPDIR/qtypes_$(cache_key "$cid")"
+        if [[ -s "$qt_file" ]]; then
+            section_header "User Queries (per QueryType)"
+            while IFS= read -r qt; do
+                local succ fail dur
+                succ=$(get_cached "qt" "$cid" "$qt" "UserQueriesSucceeded")
+                fail=$(get_cached "qt" "$cid" "$qt" "UserQueriesFailed")
+                dur=$(get_cached "qt" "$cid" "$qt" "UserQueryDuration")
+                local fail_color=$NC
+                [[ "$fail" != "--" && "$fail" != "None" && "$(printf '%.0f' "$fail" 2>/dev/null)" -gt 0 ]] 2>/dev/null && fail_color=$RED
+                metric_row "  UserQueriesSucceeded ($qt)" "$(format_int "$succ")"
+                metric_row "  UserQueriesFailed ($qt)" "$(format_int "$fail")" "$fail_color"
+                metric_row "  UserQueryDuration ($qt)" "$(format_duration_us "$dur")"
+            done <"$qt_file"
+        fi
+
+        # WLM (per QueueName)
+        local wlm_queues_file
+        wlm_queues_file="$METRICS_TMPDIR/wlmq_$(cache_key "$cid")"
+        if [[ -s "$wlm_queues_file" ]]; then
+            section_header "WLM (per queue)"
+            while IFS= read -r queue; do
+                printf "\n    ${DIM}▸ %s${NC}\n" "$queue"
+                metric_row "    WLMRunningQueries" "$(format_int "$(get_cached "wlm" "$cid" "$queue" "WLMRunningQueries")")"
+                metric_row "    WLMQueueLength" "$(format_int "$(get_cached "wlm" "$cid" "$queue" "WLMQueueLength")")"
+                metric_row "    WLMQueueWaitTime" "$(format_ms "$(get_cached "wlm" "$cid" "$queue" "WLMQueueWaitTime")")"
+                metric_row "    WLMQueriesCompletedPerSec" "$(format_num "$(get_cached "wlm" "$cid" "$queue" "WLMQueriesCompletedPerSecond")")"
+                metric_row "    WLMQueryDuration" "$(format_duration_us "$(get_cached "wlm" "$cid" "$queue" "WLMQueryDuration")")"
+            done <"$wlm_queues_file"
+        fi
+    fi
+
+}
+
+# ── main render ───────────────────────────────────────────────────────────────
+
+spawn_all_fetches() {
+    local clusters
+    clusters=$(fetch_clusters)
+    [[ -z "$clusters" ]] && return
+    while IFS=$'\t' read -r cid _node_type _num_nodes _status; do
+        spawn_fetches "$cid"
+    done <<<"$clusters"
+}
+
+render_once() {
+    local clusters
+    clusters=$(fetch_clusters)
+
+    if [[ "$COMPACT" != "true" ]]; then
+        printf '\033[2J\033[H'
+        local term_width
+        term_width=$(tput cols 2>/dev/null || printf '%s\n' 80)
+        local now
+        now=$(date '+%H:%M:%S')
+        local left="Account: $AWS_ACCOUNT"
+        local right="Updated: $now"
+        local padding=$((term_width - ${#left} - ${#right} - 1))
+        ((padding < 1)) && padding=1
+        printf "%s%*s%s\n" "$left" "$padding" "" "$right"
+    fi
+
+    if [[ -z "$clusters" ]]; then
+        printf "\nNo Redshift clusters found.\n"
+        return
+    fi
+
+    local first=1
+    while IFS=$'\t' read -r cid node_type num_nodes status; do
+        if [[ "$COMPACT" == "true" ]]; then
+            [[ "$first" -eq 0 ]] && printf '\n'
+            first=0
+            render_compact "$cid" "$node_type" "$num_nodes"
+        else
+            render_cluster_block "$cid" "$node_type" "$num_nodes" "$status"
+        fi
+        spawn_fetches "$cid"
+    done <<<"$clusters"
+}
+
+# ── entrypoint ────────────────────────────────────────────────────────────────
+
+main() {
+    RESIZE_REQUESTED="false"
+
+    cleanup() {
+        wait 2>/dev/null || true
+        printf '%s' "$SHOW_CURSOR"
+        rm -rf "$METRICS_TMPDIR"
+    }
+    on_signal() {
+        trap - EXIT INT TERM HUP QUIT
+        cleanup
+        exit 130
+    }
+
+    on_winch() {
+        RESIZE_REQUESTED="true"
+        render_once
+    }
+
+    trap cleanup EXIT
+    trap on_signal INT TERM HUP QUIT
+    trap on_winch WINCH
+
+    [[ "$COMPACT" == "true" ]] && ONCE="true"
+
+    if [[ "$COMPACT" != "true" ]]; then
+        printf '%s' "$HIDE_CURSOR"
+        printf '\033[2J\033[H'
+    fi
+
+    AWS_ACCOUNT=$(fetch_account)
+
+    if [[ "$COMPACT" == "true" ]]; then
+        spawn_all_fetches
+        wait
+        sleep 1
+        render_once
+        return
+    fi
+
+    render_once
+
+    if [[ "$ONCE" == "true" ]]; then
+        wait    # wait for all background fetches
+        sleep 2 # give final writes a moment
+        render_once
+        return
+    fi
+
+    while true; do
+        wait
+        local elapsed=0
+        while ((elapsed < INTERVAL)); do
+            sleep 1
+            ((elapsed += 1))
+            if [[ "$RESIZE_REQUESTED" == "true" ]]; then
+                RESIZE_REQUESTED="false"
+                break
+            fi
+        done
+        render_once
+    done
+}
+
+main
