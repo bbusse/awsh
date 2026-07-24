@@ -276,7 +276,15 @@ cw_fetch() {
     local f="$METRICS_TMPDIR/$key"
     local now start dims=()
     now=$(date -u +%Y-%m-%dT%H:%M:%S)
-    start=$(date -u -v-5M +%Y-%m-%dT%H:%M:%S)
+    # Epoch arithmetic + the GNU/BSD date portability convention: busybox
+    # date (Alpine) understands neither BSD's -v nor GNU's natural-language -d.
+    local start_epoch
+    start_epoch=$(($(date -u +%s) - 300))
+    if date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+        start=$(date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%S) # GNU/busybox
+    else
+        start=$(date -u -r "${start_epoch}" +%Y-%m-%dT%H:%M:%S) # BSD
+    fi
     while (($# >= 2)); do
         dims+=("Name=$1,Value=$2")
         shift 2
