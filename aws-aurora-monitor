@@ -4,11 +4,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
+# Portable "N seconds ago" in UTC, per the date portability convention below.
+function _aws_seconds_ago() {
+    local epoch
+    epoch=$(($(date -u +%s) - "$1"))
+    if date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
+        date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ # GNU
+    else
+        date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%SZ # BSD
+    fi
+}
+
 function aws_aurora_cpu() {
     local cluster="$1"
     local end_time start_time
     end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(_aws_seconds_ago 300)
 
     aws cloudwatch get-metric-statistics \
         --namespace AWS/RDS \
@@ -26,7 +37,7 @@ function aws_aurora_mem() {
     local cluster="$1"
     local end_time start_time
     end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(_aws_seconds_ago 300)
 
     aws cloudwatch get-metric-statistics \
         --namespace AWS/RDS \
@@ -45,7 +56,7 @@ function aws_aurora_connections() {
     local end_time
     local start_time
     end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(_aws_seconds_ago 300)
 
     aws cloudwatch get-metric-statistics \
         --namespace AWS/RDS \
@@ -74,36 +85,36 @@ function aws_aurora_total_memory() {
 
     # Map instance class to total memory in bytes
     case "$instance_class" in
-        db.t3.micro) printf '%s\n' 1073741824 ;;       # 1 GB
-        db.t3.small) printf '%s\n' 2147483648 ;;       # 2 GB
-        db.t3.medium) printf '%s\n' 4294967296 ;;      # 4 GB
-        db.t3.large) printf '%s\n' 8589934592 ;;       # 8 GB
-        db.t4g.micro) printf '%s\n' 1073741824 ;;      # 1 GB
-        db.t4g.small) printf '%s\n' 2147483648 ;;      # 2 GB
-        db.t4g.medium) printf '%s\n' 4294967296 ;;     # 4 GB
-        db.t4g.large) printf '%s\n' 8589934592 ;;      # 8 GB
-        db.r5.large) printf '%s\n' 17179869184 ;;      # 16 GB
-        db.r5.xlarge) printf '%s\n' 34359738368 ;;     # 32 GB
-        db.r5.2xlarge) printf '%s\n' 68719476736 ;;    # 64 GB
-        db.r5.4xlarge) printf '%s\n' 137438953472 ;;   # 128 GB
-        db.r5.8xlarge) printf '%s\n' 274877906944 ;;   # 256 GB
-        db.r5.12xlarge) printf '%s\n' 412316860416 ;;  # 384 GB
-        db.r5.16xlarge) printf '%s\n' 549755813888 ;;  # 512 GB
-        db.r6g.large) printf '%s\n' 17179869184 ;;     # 16 GB
-        db.r6g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
-        db.r6g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
-        db.r6g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
-        db.r6g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
-        db.r6g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
-        db.r6g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
-        db.r7g.large) printf '%s\n' 17179869184 ;;     # 16 GB
-        db.r7g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
-        db.r7g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
-        db.r7g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
-        db.r7g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
-        db.r7g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
-        db.r7g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
-        *) printf '%s\n' "" ;;
+    db.t3.micro) printf '%s\n' 1073741824 ;;       # 1 GB
+    db.t3.small) printf '%s\n' 2147483648 ;;       # 2 GB
+    db.t3.medium) printf '%s\n' 4294967296 ;;      # 4 GB
+    db.t3.large) printf '%s\n' 8589934592 ;;       # 8 GB
+    db.t4g.micro) printf '%s\n' 1073741824 ;;      # 1 GB
+    db.t4g.small) printf '%s\n' 2147483648 ;;      # 2 GB
+    db.t4g.medium) printf '%s\n' 4294967296 ;;     # 4 GB
+    db.t4g.large) printf '%s\n' 8589934592 ;;      # 8 GB
+    db.r5.large) printf '%s\n' 17179869184 ;;      # 16 GB
+    db.r5.xlarge) printf '%s\n' 34359738368 ;;     # 32 GB
+    db.r5.2xlarge) printf '%s\n' 68719476736 ;;    # 64 GB
+    db.r5.4xlarge) printf '%s\n' 137438953472 ;;   # 128 GB
+    db.r5.8xlarge) printf '%s\n' 274877906944 ;;   # 256 GB
+    db.r5.12xlarge) printf '%s\n' 412316860416 ;;  # 384 GB
+    db.r5.16xlarge) printf '%s\n' 549755813888 ;;  # 512 GB
+    db.r6g.large) printf '%s\n' 17179869184 ;;     # 16 GB
+    db.r6g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
+    db.r6g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
+    db.r6g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
+    db.r6g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
+    db.r6g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
+    db.r6g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
+    db.r7g.large) printf '%s\n' 17179869184 ;;     # 16 GB
+    db.r7g.xlarge) printf '%s\n' 34359738368 ;;    # 32 GB
+    db.r7g.2xlarge) printf '%s\n' 68719476736 ;;   # 64 GB
+    db.r7g.4xlarge) printf '%s\n' 137438953472 ;;  # 128 GB
+    db.r7g.8xlarge) printf '%s\n' 274877906944 ;;  # 256 GB
+    db.r7g.12xlarge) printf '%s\n' 412316860416 ;; # 384 GB
+    db.r7g.16xlarge) printf '%s\n' 549755813888 ;; # 512 GB
+    *) printf '%s\n' "" ;;
     esac
 }
 
@@ -111,7 +122,7 @@ function aws_aurora_blocked_connections() {
     local cluster="$1"
     local end_time start_time
     end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    start_time=$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+    start_time=$(_aws_seconds_ago 300)
 
     aws cloudwatch get-metric-statistics \
         --namespace AWS/RDS \
@@ -184,14 +195,14 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --name)
-                cluster="$2"
-                shift 2
-                ;;
-            *)
-                cluster="$1"
-                shift
-                ;;
+        --name)
+            cluster="$2"
+            shift 2
+            ;;
+        *)
+            cluster="$1"
+            shift
+            ;;
         esac
     done
 

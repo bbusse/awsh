@@ -38,7 +38,7 @@ COL_CPU_WIDTH=8
 FILTER_EXCLUDE=()
 
 print_help() {
-	cat <<'EOF'
+    cat <<'EOF'
 Usage: aws-asg [--profile PROFILE] [--region REGION] [--once] [--interval SECONDS] [--exclude PATTERN ...]
 
 Scans active Auto Scaling Groups and shows current/max capacity.
@@ -57,71 +57,71 @@ EOF
 }
 
 while [[ $# -gt 0 ]]; do
-	case "$1" in
-	--profile)
-		PROFILE="$2"
-		shift 2
-		;;
-	--region)
-		REGION="$2"
-		shift 2
-		;;
-	--once)
-		ONCE="true"
-		shift
-		;;
-	--interval)
-		INTERVAL="$2"
-		shift 2
-		;;
-	--no-headers)
-		NO_HEADERS="true"
-		shift
-		;;
-	--exclude)
-		FILTER_EXCLUDE+=("$2")
-		shift 2
-		;;
+    case "$1" in
+    --profile)
+        PROFILE="$2"
+        shift 2
+        ;;
+    --region)
+        REGION="$2"
+        shift 2
+        ;;
+    --once)
+        ONCE="true"
+        shift
+        ;;
+    --interval)
+        INTERVAL="$2"
+        shift 2
+        ;;
+    --no-headers)
+        NO_HEADERS="true"
+        shift
+        ;;
+    --exclude)
+        FILTER_EXCLUDE+=("$2")
+        shift 2
+        ;;
 
-	-h | --help)
-		print_help
-		exit 0
-		;;
-	*)
-		printf "Unknown argument: %s\n" "$1" >&2
-		print_help
-		exit 1
-		;;
-	esac
+    -h | --help)
+        print_help
+        exit 0
+        ;;
+    *)
+        printf "Unknown argument: %s\n" "$1" >&2
+        print_help
+        exit 1
+        ;;
+    esac
 done
 
 command -v aws >/dev/null 2>&1 || {
-	printf "aws CLI not found\n" >&2
-	exit 1
+    printf "aws CLI not found\n" >&2
+    exit 1
 }
 command -v jq >/dev/null 2>&1 || {
-	printf "jq not found\n" >&2
-	exit 1
+    printf "jq not found\n" >&2
+    exit 1
 }
 
 date_utc_minus_minutes() {
-	local minutes=$1
-	case "$(uname -s)" in
-	Darwin)
-		date -u -v-"${minutes}"M +%Y-%m-%dT%H:%M:%S
-		;;
-	*)
-		date -u --date="${minutes} minutes ago" +%Y-%m-%dT%H:%M:%S
-		;;
-	esac
+    local minutes=$1
+    local epoch
+    epoch=$(($(date -u +%s) - minutes * 60))
+    # Date portability convention: try GNU -d "@epoch" first, fall back to BSD -r.
+    if date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+        date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%S # GNU
+    else
+        date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%S # BSD
+    fi
 }
 
 AWS_ARGS=()
 if [[ -n "$PROFILE" ]]; then
-	AWS_ARGS+=(--profile "$PROFILE")
+    AWS_ARGS+=(--profile "$PROFILE")
 fi
 if [[ -n "$REGION" ]]; then
-	AWS_ARGS+=(--region "$REGION")
+    AWS_ARGS+=(--region "$REGION")
 fi
 
 # Severity per ASG from previous refresh: 0=white, 1=yellow, 2=red
@@ -140,70 +140,70 @@ METRICS_TMPDIR=$(mktemp -d)
 export METRICS_TMPDIR
 
 fetch_account() {
-	aws "${AWS_ARGS[@]}" sts get-caller-identity --query Account --output text 2>/dev/null || printf "unknown"
+    aws "${AWS_ARGS[@]}" sts get-caller-identity --query Account --output text 2>/dev/null || printf "unknown"
 }
 
 get_metrics_cached() {
-	local asg_name=$1
-	local cache_file
-	cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
-	if [[ -f "$cache_file" ]]; then
-		cat "$cache_file"
-	else
-		printf -- '-'
-	fi
+    local asg_name=$1
+    local cache_file
+    cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
+    if [[ -f "$cache_file" ]]; then
+        cat "$cache_file"
+    else
+        printf -- '-'
+    fi
 }
 
 fetch_metrics_background() {
-	local instance_ids=$1
-	local asg_name=$2
-	local cache_file
-	cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
-	local now end_time start_time
+    local instance_ids=$1
+    local asg_name=$2
+    local cache_file
+    cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
+    local now end_time start_time
 
-	now=$(date -u +%Y-%m-%dT%H:%M:%S)
-	end_time=$now
-	start_time=$(date_utc_minus_minutes 5)
+    now=$(date -u +%Y-%m-%dT%H:%M:%S)
+    end_time=$now
+    start_time=$(date_utc_minus_minutes 5)
 
-	local cpu_total=0 cpu_count=0
+    local cpu_total=0 cpu_count=0
 
-	for id in ${instance_ids//,/ }; do
-		local cpu
-		cpu=$(aws "${AWS_ARGS[@]}" cloudwatch get-metric-statistics \
-			--metric-name CPUUtilization \
-			--namespace AWS/EC2 \
-			--dimensions Name=InstanceId,Value="$id" \
-			--start-time "$start_time" \
-			--end-time "$end_time" \
-			--period 300 \
-			--statistics Average \
-			--query 'Datapoints[0].Average' \
-			--output text 2>/dev/null)
+    for id in ${instance_ids//,/ }; do
+        local cpu
+        cpu=$(aws "${AWS_ARGS[@]}" cloudwatch get-metric-statistics \
+            --metric-name CPUUtilization \
+            --namespace AWS/EC2 \
+            --dimensions Name=InstanceId,Value="$id" \
+            --start-time "$start_time" \
+            --end-time "$end_time" \
+            --period 300 \
+            --statistics Average \
+            --query 'Datapoints[0].Average' \
+            --output text 2>/dev/null)
 
-		if [[ "$cpu" != "None" && -n "$cpu" ]]; then
-			cpu_total=$(awk -v a="$cpu_total" -v b="$cpu" 'BEGIN { printf "%.6f", (a + b) }')
-			cpu_count=$((cpu_count + 1))
-		fi
-	done
+        if [[ "$cpu" != "None" && -n "$cpu" ]]; then
+            cpu_total=$(awk -v a="$cpu_total" -v b="$cpu" 'BEGIN { printf "%.6f", (a + b) }')
+            cpu_count=$((cpu_count + 1))
+        fi
+    done
 
-	local cpu_avg="-"
-	if ((cpu_count > 0)); then
-		cpu_avg=$(awk -v total="$cpu_total" -v count="$cpu_count" 'BEGIN { printf "%d", (total / count) }')
-	fi
+    local cpu_avg="-"
+    if ((cpu_count > 0)); then
+        cpu_avg=$(awk -v total="$cpu_total" -v count="$cpu_count" 'BEGIN { printf "%d", (total / count) }')
+    fi
 
-	printf '%s' "$cpu_avg" >"$cache_file"
+    printf '%s' "$cpu_avg" >"$cache_file"
 }
 
 fetch_rows() {
-	local filter_regex="" attempt=1 delay=1 output
-	if ((${#FILTER_EXCLUDE[@]} > 0)); then
-		filter_regex=$(printf '|%s' "${FILTER_EXCLUDE[@]}")
-		filter_regex="${filter_regex:1}"
-	fi
+    local filter_regex="" attempt=1 delay=1 output
+    if ((${#FILTER_EXCLUDE[@]} > 0)); then
+        filter_regex=$(printf '|%s' "${FILTER_EXCLUDE[@]}")
+        filter_regex="${filter_regex:1}"
+    fi
 
-	while true; do
-		output=$(aws "${AWS_ARGS[@]}" autoscaling describe-auto-scaling-groups --output json 2>/dev/null |
-			jq -r --arg filter "$filter_regex" '
+    while true; do
+        output=$(aws "${AWS_ARGS[@]}" autoscaling describe-auto-scaling-groups --output json 2>/dev/null |
+            jq -r --arg filter "$filter_regex" '
         .AutoScalingGroups
         | map({
             name: .AutoScalingGroupName,
@@ -220,241 +220,241 @@ fetch_rows() {
         | @tsv
       ' 2>/dev/null)
 
-		if [[ $? -eq 0 && -n "$output" ]]; then
-			printf '%s\n' "$output"
-			return 0
-		fi
+        if [[ $? -eq 0 && -n "$output" ]]; then
+            printf '%s\n' "$output"
+            return 0
+        fi
 
-		delay=$((delay > MAX_RETRY_DELAY ? MAX_RETRY_DELAY : delay))
-		printf "Retry attempt %d (waiting %ds)...\n" "$attempt" "$delay" >&2
-		sleep "$delay"
-		delay=$((delay * 2))
-		attempt=$((attempt + 1))
-	done
+        delay=$((delay > MAX_RETRY_DELAY ? MAX_RETRY_DELAY : delay))
+        printf "Retry attempt %d (waiting %ds)...\n" "$attempt" "$delay" >&2
+        sleep "$delay"
+        delay=$((delay * 2))
+        attempt=$((attempt + 1))
+    done
 }
 
 render_once() {
-	local rows now
-	local worsened=false
-	local -a to_fetch=()
-	declare -A next_severity=()
-	declare -A next_current=()
-	declare -A next_dir=()
+    local rows now
+    local worsened=false
+    local -a to_fetch=()
+    declare -A next_severity=()
+    declare -A next_current=()
+    declare -A next_dir=()
 
-	now=$(date '+%Y-%m-%d %H:%M:%S')
-	rows=$(fetch_rows)
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+    rows=$(fetch_rows)
 
-	local term_width
-	term_width=$(tput cols 2>/dev/null)
-	term_width=${term_width:-${COLUMNS:-80}}
+    local term_width
+    term_width=$(tput cols 2>/dev/null)
+    term_width=${term_width:-${COLUMNS:-80}}
 
-	if [[ -z "$rows" ]]; then
-		printf '\033[2J\033[H'
-		printf "No active Auto Scaling Groups found.\n"
-		return
-	fi
+    if [[ -z "$rows" ]]; then
+        printf '\033[2J\033[H'
+        printf "No active Auto Scaling Groups found.\n"
+        return
+    fi
 
-	# Calculate maximum ASG name length
-	local max_name_len=0
-	while IFS=$'\t' read -r name _ _ _; do
-		((${#name} > max_name_len)) && max_name_len=${#name}
-	done <<<"$rows"
+    # Calculate maximum ASG name length
+    local max_name_len=0
+    while IFS=$'\t' read -r name _ _ _; do
+        ((${#name} > max_name_len)) && max_name_len=${#name}
+    done <<<"$rows"
 
-	local fixed_cols spacing col_count available_for_asg
-	fixed_cols=$((COL_N_WIDTH + COL_MAX_WIDTH + COL_SCALE_WIDTH + COL_RANGE_WIDTH + COL_CPU_WIDTH))
-	col_count=6
-	spacing=$((col_count - 1))
-	available_for_asg=$((term_width - fixed_cols - spacing))
-	((available_for_asg < 20)) && available_for_asg=20
+    local fixed_cols spacing col_count available_for_asg
+    fixed_cols=$((COL_N_WIDTH + COL_MAX_WIDTH + COL_SCALE_WIDTH + COL_RANGE_WIDTH + COL_CPU_WIDTH))
+    col_count=6
+    spacing=$((col_count - 1))
+    available_for_asg=$((term_width - fixed_cols - spacing))
+    ((available_for_asg < 20)) && available_for_asg=20
 
-	# Use max ASG name length, but never exceed terminal width
-	local asg_col_width=$max_name_len
-	if ((asg_col_width > available_for_asg)); then
-		asg_col_width=$available_for_asg
-	fi
+    # Use max ASG name length, but never exceed terminal width
+    local asg_col_width=$max_name_len
+    if ((asg_col_width > available_for_asg)); then
+        asg_col_width=$available_for_asg
+    fi
 
-	# Calculate actual table width
-	local table_width=$((asg_col_width + fixed_cols + spacing))
+    # Calculate actual table width
+    local table_width=$((asg_col_width + fixed_cols + spacing))
 
-	# Build output to temp file
-	local output_file
-	output_file=$(mktemp)
-	trap 'rm -f "$output_file"' RETURN
+    # Build output to temp file
+    local output_file
+    output_file=$(mktemp)
+    trap 'rm -f "$output_file"' RETURN
 
-	# Print header with account and updated time
-	local time_only
-	time_only=$(printf '%s' "$now" | awk '{print $2}')
-	local left="Account: $AWS_ACCOUNT"
-	local right="Updated: $time_only"
-	local header_padding=$((table_width - ${#left} - ${#right}))
-	header_padding=$((header_padding > 1 ? header_padding : 1))
-	printf "%s%*s%s\n\n" "$left" "$header_padding" "" "$right" >>"$output_file"
+    # Print header with account and updated time
+    local time_only
+    time_only=$(printf '%s' "$now" | awk '{print $2}')
+    local left="Account: $AWS_ACCOUNT"
+    local right="Updated: $time_only"
+    local header_padding=$((table_width - ${#left} - ${#right}))
+    header_padding=$((header_padding > 1 ? header_padding : 1))
+    printf "%s%*s%s\n\n" "$left" "$header_padding" "" "$right" >>"$output_file"
 
-	if [[ "$NO_HEADERS" != "true" ]]; then
-		# Pre-pad scaling header to match data row format
-		local scale_header_padding
-		scale_header_padding=$(printf '%*s' $((COL_SCALE_WIDTH - 1)) '')
-		local scale_header_padded="${scale_header_padding}${SCALING_HEADER}"
+    if [[ "$NO_HEADERS" != "true" ]]; then
+        # Pre-pad scaling header to match data row format
+        local scale_header_padding
+        scale_header_padding=$(printf '%*s' $((COL_SCALE_WIDTH - 1)) '')
+        local scale_header_padded="${scale_header_padding}${SCALING_HEADER}"
 
-		printf "%-${asg_col_width}.${asg_col_width}s %${COL_N_WIDTH}s %${COL_MAX_WIDTH}s %s %${COL_RANGE_WIDTH}s %${COL_CPU_WIDTH}s\n" \
-			"Auto Scaling Group" "N" "Max" "$scale_header_padded" "-/+" "$CPU_HEADER" >>"$output_file"
-		local sep_len=$((asg_col_width + fixed_cols + spacing))
-		printf '%*s\n' "$sep_len" '' | tr ' ' '_' >>"$output_file"
-	fi
+        printf "%-${asg_col_width}.${asg_col_width}s %${COL_N_WIDTH}s %${COL_MAX_WIDTH}s %s %${COL_RANGE_WIDTH}s %${COL_CPU_WIDTH}s\n" \
+            "Auto Scaling Group" "N" "Max" "$scale_header_padded" "-/+" "$CPU_HEADER" >>"$output_file"
+        local sep_len=$((asg_col_width + fixed_cols + spacing))
+        printf '%*s\n' "$sep_len" '' | tr ' ' '_' >>"$output_file"
+    fi
 
-	while IFS=$'\t' read -r name current max instance_ids; do
-		local gap color severity
-		gap=$((max - current))
-		color="$NC"
-		severity=0
+    while IFS=$'\t' read -r name current max instance_ids; do
+        local gap color severity
+        gap=$((max - current))
+        color="$NC"
+        severity=0
 
-		if ((max > 2 && gap < 2)); then
-			color="$RED"
-			severity=2
-		elif ((max > 2 && gap * 100 < max * 10)); then
-			color="$YELLOW"
-			severity=1
-		fi
+        if ((max > 2 && gap < 2)); then
+            color="$RED"
+            severity=2
+        elif ((max > 2 && gap * 100 < max * 10)); then
+            color="$YELLOW"
+            severity=1
+        fi
 
-		if [[ -n "${PREV_SEVERITY[$name]+x}" ]]; then
-			if ((severity > PREV_SEVERITY[$name])); then
-				worsened=true
-			fi
-		fi
+        if [[ -n "${PREV_SEVERITY[$name]+x}" ]]; then
+            if ((severity > PREV_SEVERITY[$name])); then
+                worsened=true
+            fi
+        fi
 
-		next_severity["$name"]="$severity"
-		next_current["$name"]="$current"
+        next_severity["$name"]="$severity"
+        next_current["$name"]="$current"
 
-		# Determine scaling direction: update on change, keep previous otherwise
-		local prev_current=${PREV_CURRENT[$name]:-$current}
-		local direction
-		if ((current > prev_current)); then
-			direction="↑"
-		elif ((current < prev_current)); then
-			direction="↓"
-		else
-			direction="${PREV_DIR[$name]:--}"
-		fi
-		next_dir["$name"]="$direction"
+        # Determine scaling direction: update on change, keep previous otherwise
+        local prev_current=${PREV_CURRENT[$name]:-$current}
+        local direction
+        if ((current > prev_current)); then
+            direction="↑"
+        elif ((current < prev_current)); then
+            direction="↓"
+        else
+            direction="${PREV_DIR[$name]:--}"
+        fi
+        next_dir["$name"]="$direction"
 
-		# Use cached metrics for immediate display
-		local cpu_str
-		cpu_str=$(get_metrics_cached "$name")
-		local n_str
-		n_str=$(printf "%d" "$current")
-		local max_str
-		max_str=$(printf "%d" "$max")
+        # Use cached metrics for immediate display
+        local cpu_str
+        cpu_str=$(get_metrics_cached "$name")
+        local n_str
+        n_str=$(printf "%d" "$current")
+        local max_str
+        max_str=$(printf "%d" "$max")
 
-		local cpu_display="${cpu_str}%"
-		local cpu_color="$NC"
-		if [[ "$cpu_str" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-			if [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n > 80) ? 1 : 0 }')" -eq 1 ]]; then
-				cpu_color="$RED"
-			elif [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n >= 60) ? 1 : 0 }')" -eq 1 ]]; then
-				cpu_color="$ORANGE"
-			fi
-		fi
-		local cpu_padding_width=$((COL_CPU_WIDTH - ${#cpu_display}))
-		((cpu_padding_width < 0)) && cpu_padding_width=0
-		local cpu_field
-		cpu_field="$(printf '%*s' "$cpu_padding_width" '')${cpu_color}${cpu_display}${NC}"
+        local cpu_display="${cpu_str}%"
+        local cpu_color="$NC"
+        if [[ "$cpu_str" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            if [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n > 80) ? 1 : 0 }')" -eq 1 ]]; then
+                cpu_color="$RED"
+            elif [[ "$(awk -v n="$cpu_str" 'BEGIN { print (n >= 60) ? 1 : 0 }')" -eq 1 ]]; then
+                cpu_color="$ORANGE"
+            fi
+        fi
+        local cpu_padding_width=$((COL_CPU_WIDTH - ${#cpu_display}))
+        ((cpu_padding_width < 0)) && cpu_padding_width=0
+        local cpu_field
+        cpu_field="$(printf '%*s' "$cpu_padding_width" '')${cpu_color}${cpu_display}${NC}"
 
-		# Track min/max observed InService counts for Low/High
-		local count_min=${PREV_COUNT_MIN[$name]:-$current}
-		local count_max=${PREV_COUNT_MAX[$name]:-$current}
-		((current < count_min)) && count_min=$current
-		((current > count_max)) && count_max=$current
-		PREV_COUNT_MIN["$name"]=$count_min
-		PREV_COUNT_MAX["$name"]=$count_max
-		local low_high_display="$count_min-$count_max"
+        # Track min/max observed InService counts for Low/High
+        local count_min=${PREV_COUNT_MIN[$name]:-$current}
+        local count_max=${PREV_COUNT_MAX[$name]:-$current}
+        ((current < count_min)) && count_min=$current
+        ((current > count_max)) && count_max=$current
+        PREV_COUNT_MIN["$name"]=$count_min
+        PREV_COUNT_MAX["$name"]=$count_max
+        local low_high_display="$count_min-$count_max"
 
-		# Right-pad direction to COL_SCALE_WIDTH for display alignment
-		local direction_padding
-		direction_padding=$(printf '%*s' $((COL_SCALE_WIDTH - 1)) '')
-		local direction_padded="${direction_padding}${direction}"
+        # Right-pad direction to COL_SCALE_WIDTH for display alignment
+        local direction_padding
+        direction_padding=$(printf '%*s' $((COL_SCALE_WIDTH - 1)) '')
+        local direction_padded="${direction_padding}${direction}"
 
-		local dir_color="$NC"
-		[[ "$direction" == "↑" ]] && dir_color="$ORANGE"
-		[[ "$direction" == "↓" ]] && dir_color="$GREEN"
+        local dir_color="$NC"
+        [[ "$direction" == "↑" ]] && dir_color="$ORANGE"
+        [[ "$direction" == "↓" ]] && dir_color="$GREEN"
 
-		printf "%-${asg_col_width}.${asg_col_width}s %s%${COL_N_WIDTH}s%s %${COL_MAX_WIDTH}s %s%s%s %${COL_RANGE_WIDTH}s %s\n" \
-			"$name" "$color" "$n_str" "$NC" "$max_str" "$dir_color" "$direction_padded" "$NC" "$low_high_display" "$cpu_field" >>"$output_file"
+        printf "%-${asg_col_width}.${asg_col_width}s %s%${COL_N_WIDTH}s%s %${COL_MAX_WIDTH}s %s%s%s %${COL_RANGE_WIDTH}s %s\n" \
+            "$name" "$color" "$n_str" "$NC" "$max_str" "$dir_color" "$direction_padded" "$NC" "$low_high_display" "$cpu_field" >>"$output_file"
 
-		# Queue this instance_ids for background metric fetch if CPU not cached
-		if [[ "$cpu_str" == "-" ]]; then
-			to_fetch+=("$instance_ids	$name")
-		fi
-	done <<<"$rows"
+        # Queue this instance_ids for background metric fetch if CPU not cached
+        if [[ "$cpu_str" == "-" ]]; then
+            to_fetch+=("$instance_ids	$name")
+        fi
+    done <<<"$rows"
 
-	# Update severity and current tracking
-	for name in "${!PREV_SEVERITY[@]}"; do
-		unset 'PREV_SEVERITY[$name]'
-	done
-	for name in "${!PREV_CURRENT[@]}"; do
-		unset 'PREV_CURRENT[$name]'
-	done
-	for name in "${!next_severity[@]}"; do
-		PREV_SEVERITY["$name"]="${next_severity[$name]}"
-	done
-	for name in "${!next_current[@]}"; do
-		PREV_CURRENT["$name"]="${next_current[$name]}"
-	done
-	for name in "${!next_dir[@]}"; do
-		PREV_DIR["$name"]="${next_dir[$name]}"
-	done
+    # Update severity and current tracking
+    for name in "${!PREV_SEVERITY[@]}"; do
+        unset 'PREV_SEVERITY[$name]'
+    done
+    for name in "${!PREV_CURRENT[@]}"; do
+        unset 'PREV_CURRENT[$name]'
+    done
+    for name in "${!next_severity[@]}"; do
+        PREV_SEVERITY["$name"]="${next_severity[$name]}"
+    done
+    for name in "${!next_current[@]}"; do
+        PREV_CURRENT["$name"]="${next_current[$name]}"
+    done
+    for name in "${!next_dir[@]}"; do
+        PREV_DIR["$name"]="${next_dir[$name]}"
+    done
 
-	# Clear screen and print all output at once
-	printf '\033[2J\033[H'
-	printf '%s\n' "$(cat "$output_file")"
+    # Clear screen and print all output at once
+    printf '\033[2J\033[H'
+    printf '%s\n' "$(cat "$output_file")"
 
-	if [[ "$worsened" == "true" ]]; then
-		printf '\a'
-	fi
+    if [[ "$worsened" == "true" ]]; then
+        printf '\a'
+    fi
 
-	# Spawn background metric fetches for uncached instance sets
-	for entry in "${to_fetch[@]}"; do
-		local ids=${entry%%$'\t'*}
-		local asg=${entry##*$'\t'}
-		fetch_metrics_background "$ids" "$asg" &
-	done
+    # Spawn background metric fetches for uncached instance sets
+    for entry in "${to_fetch[@]}"; do
+        local ids=${entry%%$'\t'*}
+        local asg=${entry##*$'\t'}
+        fetch_metrics_background "$ids" "$asg" &
+    done
 }
 
 main() {
-	cleanup() {
-		wait 2>/dev/null || true
-		printf '%s' "$SHOW_CURSOR"
-		rm -rf "$METRICS_TMPDIR"
-	}
+    cleanup() {
+        wait 2>/dev/null || true
+        printf '%s' "$SHOW_CURSOR"
+        rm -rf "$METRICS_TMPDIR"
+    }
 
-	on_signal() {
-		trap - EXIT INT TERM HUP QUIT
-		cleanup
-		exit 130
-	}
+    on_signal() {
+        trap - EXIT INT TERM HUP QUIT
+        cleanup
+        exit 130
+    }
 
-	# Restore cursor and cleanup on normal exit and common termination signals.
-	trap cleanup EXIT
-	trap on_signal INT TERM HUP QUIT
+    # Restore cursor and cleanup on normal exit and common termination signals.
+    trap cleanup EXIT
+    trap on_signal INT TERM HUP QUIT
 
-	printf '%s' "$HIDE_CURSOR"
-	printf '\033[2J\033[H'
+    printf '%s' "$HIDE_CURSOR"
+    printf '\033[2J\033[H'
 
-	AWS_ACCOUNT=$(fetch_account)
-	render_once
+    AWS_ACCOUNT=$(fetch_account)
+    render_once
 
-	if [[ "$ONCE" == "true" ]]; then
-		wait    # Wait for background fetches to complete
-		sleep 1 # Give jobs a moment to finish writing
-		# Re-render to show populated metrics
-		render_once
-		return
-	fi
+    if [[ "$ONCE" == "true" ]]; then
+        wait    # Wait for background fetches to complete
+        sleep 1 # Give jobs a moment to finish writing
+        # Re-render to show populated metrics
+        render_once
+        return
+    fi
 
-	while true; do
-		wait # Wait for background metric fetches before next refresh
-		sleep "$INTERVAL"
-		render_once
-	done
+    while true; do
+        wait # Wait for background metric fetches before next refresh
+        sleep "$INTERVAL"
+        render_once
+    done
 }
 
 main
