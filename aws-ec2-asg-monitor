@@ -14,7 +14,8 @@ shopt -s checkwinsize
 
 PROFILE=""
 REGION=""
-INTERVAL=60
+INTERVAL=15
+CPU_MIN_POLL=15 # CPU is refetched with the table, but never more often than this
 ONCE="false"
 NO_HEADERS="false"
 MAX_RETRY_DELAY=60
@@ -42,15 +43,16 @@ print_help() {
 Usage: aws-asg [--profile PROFILE] [--region REGION] [--once] [--interval SECONDS] [--exclude PATTERN ...]
 
 Scans active Auto Scaling Groups and shows current/max capacity.
-Updates every 60 seconds by default.
+Updates every 15 seconds by default. CPU metrics refresh with the table
+but are never polled more often than every 15 seconds.
 
 Options:
   --profile PROFILE     AWS profile to use
   --region REGION       AWS region to query
   --once                Print once and exit
-  --interval SECONDS    Refresh interval in seconds (default: 60)
+  --interval SECONDS    Refresh interval in seconds (default: 15)
   --no-headers          Skip column headers
-	--exclude PATTERN     Exclude ASG names matching PATTERN (case-insensitive, repeatable)
+  --exclude PATTERN     Exclude ASG names matching PATTERN (case-insensitive, repeatable)
 
   -h, --help            Show this help
 EOF
@@ -143,22 +145,36 @@ fetch_account() {
     aws "${AWS_ARGS[@]}" sts get-caller-identity --query Account --output text 2>/dev/null || printf "unknown"
 }
 
+metrics_cache_file() {
+    printf '%s/cpu_%s' "$METRICS_TMPDIR" "$(printf '%s' "$1" | md5sum | cut -d' ' -f1)"
+}
+
+# Cache file holds two lines: CPU value and the epoch it was fetched at
 get_metrics_cached() {
-    local asg_name=$1
     local cache_file
-    cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
+    cache_file=$(metrics_cache_file "$1")
     if [[ -f "$cache_file" ]]; then
-        cat "$cache_file"
+        head -n 1 "$cache_file"
     else
         printf -- '-'
     fi
+}
+
+# Returns 0 when no cached CPU exists or it is older than CPU_MIN_POLL
+metrics_stale() {
+    local cache_file fetched_at
+    cache_file=$(metrics_cache_file "$1")
+    [[ -f "$cache_file" ]] || return 0
+    fetched_at=$(sed -n 2p "$cache_file")
+    [[ "$fetched_at" =~ ^[0-9]+$ ]] || return 0
+    (($(date +%s) - fetched_at >= CPU_MIN_POLL))
 }
 
 fetch_metrics_background() {
     local instance_ids=$1
     local asg_name=$2
     local cache_file
-    cache_file="$METRICS_TMPDIR/cpu_$(printf '%s' "$asg_name" | md5sum | cut -d' ' -f1)"
+    cache_file=$(metrics_cache_file "$asg_name")
     local now end_time start_time
 
     now=$(date -u +%Y-%m-%dT%H:%M:%S)
@@ -191,7 +207,9 @@ fetch_metrics_background() {
         cpu_avg=$(awk -v total="$cpu_total" -v count="$cpu_count" 'BEGIN { printf "%d", (total / count) }')
     fi
 
-    printf '%s' "$cpu_avg" >"$cache_file"
+    # Write atomically so a concurrent read never sees a partial file
+    printf '%s\n%s\n' "$cpu_avg" "$(date +%s)" >"$cache_file.tmp"
+    mv -f "$cache_file.tmp" "$cache_file"
 }
 
 fetch_rows() {
@@ -380,8 +398,8 @@ render_once() {
         printf "%-${asg_col_width}.${asg_col_width}s %s%${COL_N_WIDTH}s%s %${COL_MAX_WIDTH}s %s%s%s %${COL_RANGE_WIDTH}s %s\n" \
             "$name" "$color" "$n_str" "$NC" "$max_str" "$dir_color" "$direction_padded" "$NC" "$low_high_display" "$cpu_field" >>"$output_file"
 
-        # Queue this instance_ids for background metric fetch if CPU not cached
-        if [[ "$cpu_str" == "-" ]]; then
+        # Queue a background metric fetch if CPU is missing or older than CPU_MIN_POLL
+        if metrics_stale "$name"; then
             to_fetch+=("$instance_ids	$name")
         fi
     done <<<"$rows"
